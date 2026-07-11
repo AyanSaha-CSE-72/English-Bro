@@ -1,8 +1,8 @@
 "use client";
 
-import Image from "next/image";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PROFX_TOPICS } from "@/lib/profx-topics";
+import { generateProfXReply, type ChatTurn } from "@/lib/profx-engine";
 import { VOICE_PROFILES, getVoiceProfile, type VoiceProfileId } from "@/lib/voice-profiles";
 import { speakHuman } from "@/lib/human-speech";
 
@@ -25,7 +25,6 @@ interface ReportData {
   corrections: { id: string; correction: string | null; order: number }[];
 }
 
-const STORAGE_KEY = "profx.conversationId";
 const VOICE_STORAGE_KEY = "profx.voiceProfile";
 const SILENCE_MS = 1400;
 
@@ -40,11 +39,9 @@ function formatDuration(seconds: number): string {
 }
 
 export default function ProfXChat() {
-  const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [booting, setBooting] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
   const [autoSpeak, setAutoSpeak] = useState(true);
   const [speechSupported, setSpeechSupported] = useState(false);
@@ -104,56 +101,6 @@ export default function ProfXChat() {
     requestAnimationFrame(() => {
       scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
     });
-  }, []);
-
-  // Bootstrap: reuse or create a conversation.
-  useEffect(() => {
-    let cancelled = false;
-
-    async function boot() {
-      setBooting(true);
-      setError(null);
-      try {
-        const savedId = typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEY) : null;
-        let id = savedId;
-
-        if (id) {
-          const check = await fetch(`/api/conversations/${id}/messages`);
-          if (!check.ok) id = null;
-        }
-
-        if (!id) {
-          const res = await fetch("/api/conversations", { method: "POST" });
-          const data = await res.json();
-          id = data.conversation.id as string;
-          window.localStorage.setItem(STORAGE_KEY, id);
-        }
-
-        if (cancelled) return;
-        setConversationId(id);
-
-        const msgsRes = await fetch(`/api/conversations/${id}/messages`);
-        const msgsData = await msgsRes.json();
-        if (cancelled) return;
-        setMessages(
-          (msgsData.messages ?? []).map((m: { id: string; role: string; content: string; correction: string | null }) => ({
-            id: m.id,
-            role: m.role === "assistant" ? "assistant" : "user",
-            content: m.content,
-            correction: m.correction,
-          }))
-        );
-      } catch {
-        if (!cancelled) setError("Couldn't connect to English BRo. Please refresh the page.");
-      } finally {
-        if (!cancelled) setBooting(false);
-      }
-    }
-
-    boot();
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   useEffect(() => {
@@ -291,7 +238,7 @@ export default function ProfXChat() {
 
   async function sendMessage(text: string, topicOverride?: string) {
     const trimmed = text.trim();
-    if (!trimmed || !conversationId || loading) {
+    if (!trimmed || loading) {
       sendingRef.current = false;
       return;
     }
@@ -306,18 +253,16 @@ export default function ProfXChat() {
     setError(null);
 
     try {
-      const res = await fetch(`/api/conversations/${conversationId}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: trimmed, topic: topicToSend }),
-      });
-      if (!res.ok) throw new Error("request failed");
-      const data = await res.json();
+      const history: ChatTurn[] = [...messages, optimisticUser].map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
+      const { reply, correction } = await generateProfXReply(trimmed, history, topicToSend as any);
       const assistantMessage: Message = {
-        id: data.assistantMessage.id,
+        id: newId(),
         role: "assistant",
-        content: data.assistantMessage.content,
-        correction: data.assistantMessage.correction,
+        content: reply,
+        correction,
       };
       setMessages((prev) => [...prev, assistantMessage]);
 
@@ -374,7 +319,6 @@ export default function ProfXChat() {
   }
 
   async function startNewConversation() {
-    setBooting(true);
     setMessages([]);
     setError(null);
     setShowReport(false);
@@ -382,28 +326,43 @@ export default function ProfXChat() {
     setActiveTopic(null);
     if (liveMode) toggleLiveMode();
     stopSpeaking();
-    try {
-      const res = await fetch("/api/conversations", { method: "POST" });
-      const data = await res.json();
-      const id = data.conversation.id as string;
-      window.localStorage.setItem(STORAGE_KEY, id);
-      setConversationId(id);
-    } catch {
-      setError("Couldn't start a new conversation. Please try again.");
-    } finally {
-      setBooting(false);
-    }
   }
 
   async function openReport() {
-    if (!conversationId) return;
     setReportLoading(true);
     setShowReport(true);
     try {
-      const res = await fetch(`/api/conversations/${conversationId}/report`);
-      if (!res.ok) throw new Error("failed");
-      const data: ReportData = await res.json();
-      setReport(data);
+      const userMessages = messages.filter((m) => m.role === "user");
+      const correctionMessages = messages.filter((m) => m.role === "assistant" && m.correction);
+      const totalUserMessages = userMessages.length;
+      const totalCorrections = correctionMessages.length;
+      const correctionRate = totalUserMessages > 0 ? totalCorrections / totalUserMessages : 0;
+      const rawScore = 10 - correctionRate * 10;
+      const fluencyScore = Math.max(1, Math.min(10, Math.round(rawScore)));
+      const avgWordsPerTurn =
+        totalUserMessages > 0
+          ? Math.round(
+              (userMessages.reduce((sum, m) => sum + m.content.trim().split(/\s+/).filter(Boolean).length, 0) /
+                totalUserMessages) *
+                10
+            ) / 10
+          : 0;
+      const durationSeconds = Math.max(0, Math.round(messages.length * 4));
+      const reportLabel = scoreLabel(fluencyScore);
+
+      setReport({
+        conversationTitle: "Current conversation",
+        totalUserMessages,
+        totalCorrections,
+        fluencyScore,
+        scoreLabel: reportLabel.label,
+        feedback: reportLabel.feedback,
+        avgWordsPerTurn,
+        durationSeconds,
+        corrections: correctionMessages
+          .map((m, index) => ({ id: m.id, correction: m.correction, order: index }))
+          .filter((item) => item.correction !== null),
+      });
     } catch {
       setError("Couldn't generate your speaking report right now.");
       setShowReport(false);
@@ -424,6 +383,31 @@ export default function ProfXChat() {
     : liveMode
     ? "Live mode ready"
     : null;
+
+  function scoreLabel(score: number): { label: string; feedback: string } {
+    if (score >= 9) {
+      return {
+        label: "Excellent",
+        feedback: "Your spoken English is fluent and clean — you're speaking with real confidence!",
+      };
+    }
+    if (score >= 7) {
+      return {
+        label: "Strong",
+        feedback: "You're doing great! Just a few small slips to iron out and you'll sound even more natural.",
+      };
+    }
+    if (score >= 5) {
+      return {
+        label: "Good progress",
+        feedback: "Solid effort — keep practicing the corrections below and you'll level up quickly.",
+      };
+    }
+    return {
+      label: "Keep practicing",
+      feedback: "You're building a great habit by speaking often. Review the tips below and try again soon!",
+    };
+  }
 
   function renderCorrectionTip(correctionStr: string) {
     let struct: { original: string; corrected: string; explanation: string } | null = null;
@@ -484,7 +468,7 @@ export default function ProfXChat() {
         <div className="mx-auto flex max-w-3xl flex-wrap items-center justify-between gap-2 px-4 py-4">
           <div className="flex items-center gap-3">
             <div className="relative h-11 w-11 overflow-hidden rounded-2xl shadow-sm ring-2 ring-slate-100">
-              <Image src="/images/profx-avatar.png" alt="English BRo" fill sizes="44px" className="object-cover" />
+              <img src="/images/profx-avatar.png" alt="English BRo" className="h-full w-full object-cover" />
               {(isRecording || assistantSpeaking) && (
                 <span
                   className={`absolute inset-0 animate-ping rounded-2xl ${
@@ -593,13 +577,7 @@ export default function ProfXChat() {
         )}
 
         <div ref={scrollRef} className="flex-1 space-y-6 overflow-y-auto pb-24 pr-1" style={{ maxHeight: "calc(100vh - 280px)" }}>
-          {booting && (
-            <div className="grid h-full place-items-center py-20 text-slate-400">
-              <p className="animate-pulse text-sm">Connecting to English BRo…</p>
-            </div>
-          )}
-
-          {!booting && messages.length === 0 && (
+            {messages.length === 0 && (
             <div className="mt-2 rounded-3xl border border-dashed border-slate-200 bg-white p-6 text-center shadow-sm">
               <p className="text-2xl">👋</p>
               <h2 className="mt-2 text-lg font-semibold text-slate-800">Say hi to English BRo!</h2>
@@ -674,7 +652,7 @@ export default function ProfXChat() {
           {loading && (
             <div className="flex justify-start gap-2">
               <div className="relative mt-1 h-7 w-7 shrink-0 overflow-hidden rounded-full ring-2 ring-white">
-                <Image src="/images/profx-avatar.png" alt="English BRo" fill sizes="28px" className="object-cover" />
+                <img src="/images/profx-avatar.png" alt="English BRo" className="h-full w-full object-cover" />
               </div>
               <div className="rounded-2xl rounded-tl-sm border border-slate-200 bg-[#F7F5F0] px-4 py-2.5 text-sm text-slate-400 shadow-sm">
                 <span className="inline-flex gap-1">
@@ -735,7 +713,7 @@ export default function ProfXChat() {
               />
               <button
                 type="submit"
-                disabled={!input.trim() || loading || booting || liveMode}
+                disabled={!input.trim() || loading || liveMode}
                 className="flex h-10 shrink-0 items-center justify-center rounded-full bg-slate-900 px-4 text-xs font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Send
