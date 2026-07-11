@@ -741,6 +741,10 @@ export default function ProfXChat() {
                 Send
               </button>
             </form>
+
+            <p className="text-[11px] font-medium tracking-wide text-slate-400">
+              Made by Ayan Saha
+            </p>
           </div>
         </div>
       </main>
