@@ -1,4 +1,4 @@
-import { db } from "@/db";
+import { getDb } from "@/db";
 import { conversations, messages } from "@/db/schema";
 import { asc, eq, isNotNull, and } from "drizzle-orm";
 import { NextRequest } from "next/server";
@@ -36,6 +36,7 @@ function scoreLabel(score: number): { label: string; feedback: string } {
 
 export async function GET(_req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
+  const db = getDb();
 
   const conversationRows = await db.select().from(conversations).where(eq(conversations.id, id)).limit(1);
   if (conversationRows.length === 0) {

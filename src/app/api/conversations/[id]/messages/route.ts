@@ -1,4 +1,4 @@
-import { db } from "@/db";
+import { getDb } from "@/db";
 import { conversations, messages } from "@/db/schema";
 import { generateProfXReply, type ChatTurn } from "@/lib/profx-engine";
 import { asc, eq } from "drizzle-orm";
@@ -12,6 +12,7 @@ interface RouteParams {
 
 export async function GET(_req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
+  const db = getDb();
   const rows = await db
     .select()
     .from(messages)
@@ -22,6 +23,7 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
 
 export async function POST(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
+  const db = getDb();
   const body = await req.json().catch(() => null);
   const text = typeof body?.text === "string" ? body.text.trim() : "";
   const topic = typeof body?.topic === "string" ? body.topic : undefined;
