@@ -1,17 +1,23 @@
-import { getDb } from "@/db";
-import { conversations } from "@/db/schema";
-import { desc } from "drizzle-orm";
+import { NextResponse } from "next/server";
 
-export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 export async function GET() {
-  const db = getDb();
-  const rows = await db.select().from(conversations).orderBy(desc(conversations.updatedAt)).limit(20);
-  return Response.json({ conversations: rows });
+  return NextResponse.json({ conversations: [] });
 }
 
-export async function POST() {
-  const db = getDb();
-  const [conversation] = await db.insert(conversations).values({}).returning();
-  return Response.json({ conversation });
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => ({}));
+  const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : "New conversation";
+
+  return NextResponse.json(
+    {
+      conversation: {
+        id: crypto.randomUUID(),
+        title,
+        createdAt: new Date().toISOString(),
+      },
+    },
+    { status: 201 }
+  );
 }
