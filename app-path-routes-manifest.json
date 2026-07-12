@@ -1,0 +1,9 @@
+{
+  "/_global-error/page": "/_global-error",
+  "/_not-found/page": "/_not-found",
+  "/api/conversations/[id]/messages/route": "/api/conversations/[id]/messages",
+  "/api/conversations/[id]/report/route": "/api/conversations/[id]/report",
+  "/api/conversations/route": "/api/conversations",
+  "/api/health/route": "/api/health",
+  "/page": "/"
+}
